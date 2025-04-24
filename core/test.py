@@ -42,8 +42,7 @@ def test_net(cfg,
              encoder=None,
              decoder=None,
              refiner=None,
-             merger=None,
-             max_samples=None):
+             merger=None):
     # Enable the inbuilt cudnn auto-tuner to find the best algorithm to use
     torch.backends.cudnn.benchmark = True
 
@@ -140,9 +139,6 @@ def test_net(cfg,
     merger.eval()
 
     for sample_idx, (taxonomy_id, sample_name, rendering_images, ground_truth_volume) in enumerate(test_data_loader):
-        if max_samples is not None and sample_idx >= max_samples:
-            print(f"[INFO] Reached max_samples={max_samples}, exiting test loop")
-            break
         taxonomy_id = taxonomy_id[0] if isinstance(taxonomy_id[0], str) else taxonomy_id[0].item()
         sample_name = sample_name[0]
 
@@ -187,61 +183,26 @@ def test_net(cfg,
 
             # Append generated volumes to TensorBoard
             if output_dir and sample_idx < 3:
-                img_dir = os.path.join(output_dir, 'images')
-                os.makedirs(img_dir, exist_ok=True)
+                img_dir = output_dir % 'images'
                 gv = generated_volume.cpu().numpy()
                 rendering_views = utils.binvox_visualization.get_volume_views(
                     gv, os.path.join(img_dir, 'test'), epoch_idx)
-                if test_writer is not None:
-                    test_writer.add_image(
-                        'Test Sample#%02d/Volume Reconstructed' % sample_idx,
-                        rendering_views, epoch_idx
-                    )
-                    gtv = ground_truth_volume.cpu().numpy()
-                    rendering_views = utils.binvox_visualization.get_volume_views(
-                        gtv, os.path.join(img_dir, 'test'), epoch_idx)
-                    test_writer.add_image(
-                        'Test Sample#%02d/Volume GroundTruth' % sample_idx,
-                        rendering_views, epoch_idx
-                    )
+                test_writer.add_image(
+                    'Test Sample#%02d/Volume Reconstructed' % sample_idx,
+                    rendering_views, epoch_idx
+                )
+                gtv = ground_truth_volume.cpu().numpy()
+                rendering_views = utils.binvox_visualization.get_volume_views(
+                    gtv, os.path.join(img_dir, 'test'), epoch_idx)
+                test_writer.add_image(
+                    'Test Sample#%02d/Volume GroundTruth' % sample_idx,
+                    rendering_views, epoch_idx
+                )
 
             # Print sample loss and IoU
             print('[INFO] %s Test[%d/%d] Taxonomy = %s Sample = %s EDLoss = %.4f RLoss = %.4f IoU = %s' %
                   (dt.now(), sample_idx + 1, n_samples, taxonomy_id, sample_name, encoder_loss.item(),
                    refiner_loss.item(), ['%.4f' % si for si in sample_iou]))
-
-            # -----------------------------------
-            #  SAVE A 3D-VOXEL PLOT FOR THIS SAMPLE
-            # -----------------------------------
-            if output_dir is not None:
-                import matplotlib.pyplot as plt
-                from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
-
-                # make sure our save directory exists
-                save_dir = os.path.join(output_dir, 'visualizations')
-                os.makedirs(save_dir, exist_ok=True)
-
-                # pull the predicted volume tensor into a NumPy array
-                # (shape will be [1, D, H, W] or [D, H, W] after your squeeze/mean)
-                vox = generated_volume.detach().cpu().numpy().squeeze()
-
-                # threshold at the first voxel‐threshold in your config
-                thr = cfg.TEST.VOXEL_THRESH[0]
-                filled = vox >= thr
-
-                # plot & save
-                fig = plt.figure(figsize=(6, 6))
-                ax = fig.add_subplot(111, projection='3d')
-                ax.voxels(filled, edgecolor='k')
-                ax.set_title(f'{taxonomy_id}_{sample_name}')
-                ax.set_axis_off()
-
-                png_path = os.path.join(
-                    save_dir,
-                    f'{taxonomy_id}_{sample_name}_ep{epoch_idx}.png'
-                )
-                plt.savefig(png_path, bbox_inches='tight', pad_inches=0)
-                plt.close(fig)
 
     # Output testing results
     mean_iou = []

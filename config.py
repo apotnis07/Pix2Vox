@@ -59,8 +59,8 @@ __C.CONST.CROP_IMG_H                        = 128       # Dummy property for Pas
 # Directories
 #
 __C.DIR                                     = edict()
-__C.DIR.OUT_PATH                            = './results'
-__C.DIR.RANDOM_BG_PATH                      = './datasets/SUN2012/JPEGImages'
+__C.DIR.OUT_PATH                            = './output'
+__C.DIR.RANDOM_BG_PATH                      = '/home/hzxie/Datasets/SUN2012/JPEGImages'
 
 #
 # Network
