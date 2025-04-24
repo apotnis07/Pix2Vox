@@ -15,7 +15,7 @@ def get_volume_views(volume, save_dir, n_itr):
 
     volume = volume.squeeze().__ge__(0.5)
     fig = plt.figure()
-    ax = fig.gca(projection=Axes3D.name)
+    ax = fig.add_subplot(111, projection=Axes3D.name)
     ax.set_aspect('equal')
     ax.voxels(volume, edgecolor="k")
 

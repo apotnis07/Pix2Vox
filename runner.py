@@ -74,7 +74,8 @@ def main():
         train_net(cfg)
     else:
         if 'WEIGHTS' in cfg.CONST and os.path.exists(cfg.CONST.WEIGHTS):
-            test_net(cfg)
+         # pass the output path so test.py can dump visualizations there
+            test_net(cfg, output_dir=cfg.DIR.OUT_PATH, max_samples=10)
         else:
             print('[FATAL] %s Please specify the file path of checkpoint.' % (dt.now()))
             sys.exit(2)

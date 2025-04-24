@@ -15,11 +15,23 @@ import utils.data_transforms
 import utils.network_utils
 
 from datetime import datetime as dt
+from collections import OrderedDict
 
 from models.encoder import Encoder
 from models.decoder import Decoder
 from models.refiner import Refiner
 from models.merger import Merger
+
+
+def strip_module_prefix(state_dict):
+    """
+    Remove the 'module.' prefix from keys in a DataParallel checkpoint.
+    """
+    new_dict = OrderedDict()
+    for k, v in state_dict.items():
+        name = k[7:] if k.startswith('module.') else k
+        new_dict[name] = v
+    return new_dict
 
 
 def test_net(cfg,
@@ -30,7 +42,8 @@ def test_net(cfg,
              encoder=None,
              decoder=None,
              refiner=None,
-             merger=None):
+             merger=None,
+             max_samples=None):
     # Enable the inbuilt cudnn auto-tuner to find the best algorithm to use
     torch.backends.cudnn.benchmark = True
 
@@ -53,12 +66,16 @@ def test_net(cfg,
         ])
 
         dataset_loader = utils.data_loaders.DATASET_LOADER_MAPPING[cfg.DATASET.TEST_DATASET](cfg)
-        test_data_loader = torch.utils.data.DataLoader(dataset=dataset_loader.get_dataset(
-            utils.data_loaders.DatasetType.TEST, cfg.CONST.N_VIEWS_RENDERING, test_transforms),
-                                                       batch_size=1,
-                                                       num_workers=1,
-                                                       pin_memory=True,
-                                                       shuffle=False)
+        test_data_loader = torch.utils.data.DataLoader(
+            dataset=dataset_loader.get_dataset(
+                utils.data_loaders.DatasetType.TEST,
+                cfg.CONST.N_VIEWS_RENDERING,
+                test_transforms),
+            batch_size=1,
+            num_workers=1,
+            pin_memory=True,
+            shuffle=False
+        )
 
     # Set up networks
     if decoder is None or encoder is None:
@@ -74,15 +91,38 @@ def test_net(cfg,
             merger = torch.nn.DataParallel(merger).cuda()
 
         print('[INFO] %s Loading weights from %s ...' % (dt.now(), cfg.CONST.WEIGHTS))
-        checkpoint = torch.load(cfg.CONST.WEIGHTS)
+        checkpoint = torch.load(
+            cfg.CONST.WEIGHTS,
+            map_location=torch.device('cpu'),
+            weights_only=False
+        )
         epoch_idx = checkpoint['epoch_idx']
-        encoder.load_state_dict(checkpoint['encoder_state_dict'])
-        decoder.load_state_dict(checkpoint['decoder_state_dict'])
 
+        # Load encoder
+        enc_sd = checkpoint['encoder_state_dict']
+        if not torch.cuda.is_available():
+            enc_sd = strip_module_prefix(enc_sd)
+        encoder.load_state_dict(enc_sd)
+
+        # Load decoder
+        dec_sd = checkpoint['decoder_state_dict']
+        if not torch.cuda.is_available():
+            dec_sd = strip_module_prefix(dec_sd)
+        decoder.load_state_dict(dec_sd)
+
+        # Load refiner if used
         if cfg.NETWORK.USE_REFINER:
-            refiner.load_state_dict(checkpoint['refiner_state_dict'])
+            ref_sd = checkpoint['refiner_state_dict']
+            if not torch.cuda.is_available():
+                ref_sd = strip_module_prefix(ref_sd)
+            refiner.load_state_dict(ref_sd)
+
+        # Load merger if used
         if cfg.NETWORK.USE_MERGER:
-            merger.load_state_dict(checkpoint['merger_state_dict'])
+            mer_sd = checkpoint['merger_state_dict']
+            if not torch.cuda.is_available():
+                mer_sd = strip_module_prefix(mer_sd)
+            merger.load_state_dict(mer_sd)
 
     # Set up loss functions
     bce_loss = torch.nn.BCELoss()
@@ -100,6 +140,9 @@ def test_net(cfg,
     merger.eval()
 
     for sample_idx, (taxonomy_id, sample_name, rendering_images, ground_truth_volume) in enumerate(test_data_loader):
+        if max_samples is not None and sample_idx >= max_samples:
+            print(f"[INFO] Reached max_samples={max_samples}, exiting test loop")
+            break
         taxonomy_id = taxonomy_id[0] if isinstance(taxonomy_id[0], str) else taxonomy_id[0].item()
         sample_name = sample_name[0]
 
@@ -144,21 +187,61 @@ def test_net(cfg,
 
             # Append generated volumes to TensorBoard
             if output_dir and sample_idx < 3:
-                img_dir = output_dir % 'images'
-                # Volume Visualization
+                img_dir = os.path.join(output_dir, 'images')
+                os.makedirs(img_dir, exist_ok=True)
                 gv = generated_volume.cpu().numpy()
-                rendering_views = utils.binvox_visualization.get_volume_views(gv, os.path.join(img_dir, 'test'),
-                                                                              epoch_idx)
-                test_writer.add_image('Test Sample#%02d/Volume Reconstructed' % sample_idx, rendering_views, epoch_idx)
-                gtv = ground_truth_volume.cpu().numpy()
-                rendering_views = utils.binvox_visualization.get_volume_views(gtv, os.path.join(img_dir, 'test'),
-                                                                              epoch_idx)
-                test_writer.add_image('Test Sample#%02d/Volume GroundTruth' % sample_idx, rendering_views, epoch_idx)
+                rendering_views = utils.binvox_visualization.get_volume_views(
+                    gv, os.path.join(img_dir, 'test'), epoch_idx)
+                if test_writer is not None:
+                    test_writer.add_image(
+                        'Test Sample#%02d/Volume Reconstructed' % sample_idx,
+                        rendering_views, epoch_idx
+                    )
+                    gtv = ground_truth_volume.cpu().numpy()
+                    rendering_views = utils.binvox_visualization.get_volume_views(
+                        gtv, os.path.join(img_dir, 'test'), epoch_idx)
+                    test_writer.add_image(
+                        'Test Sample#%02d/Volume GroundTruth' % sample_idx,
+                        rendering_views, epoch_idx
+                    )
 
             # Print sample loss and IoU
             print('[INFO] %s Test[%d/%d] Taxonomy = %s Sample = %s EDLoss = %.4f RLoss = %.4f IoU = %s' %
                   (dt.now(), sample_idx + 1, n_samples, taxonomy_id, sample_name, encoder_loss.item(),
                    refiner_loss.item(), ['%.4f' % si for si in sample_iou]))
+
+            # -----------------------------------
+            #  SAVE A 3D-VOXEL PLOT FOR THIS SAMPLE
+            # -----------------------------------
+            if output_dir is not None:
+                import matplotlib.pyplot as plt
+                from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+
+                # make sure our save directory exists
+                save_dir = os.path.join(output_dir, 'visualizations')
+                os.makedirs(save_dir, exist_ok=True)
+
+                # pull the predicted volume tensor into a NumPy array
+                # (shape will be [1, D, H, W] or [D, H, W] after your squeeze/mean)
+                vox = generated_volume.detach().cpu().numpy().squeeze()
+
+                # threshold at the first voxel‐threshold in your config
+                thr = cfg.TEST.VOXEL_THRESH[0]
+                filled = vox >= thr
+
+                # plot & save
+                fig = plt.figure(figsize=(6, 6))
+                ax = fig.add_subplot(111, projection='3d')
+                ax.voxels(filled, edgecolor='k')
+                ax.set_title(f'{taxonomy_id}_{sample_name}')
+                ax.set_axis_off()
+
+                png_path = os.path.join(
+                    save_dir,
+                    f'{taxonomy_id}_{sample_name}_ep{epoch_idx}.png'
+                )
+                plt.savefig(png_path, bbox_inches='tight', pad_inches=0)
+                plt.close(fig)
 
     # Output testing results
     mean_iou = []
